@@ -1,0 +1,65 @@
+# .NET y pruebas
+bin/
+obj/
+TestResults/
+artifacts/
+*.user
+*.suo
+*.rsuser
+
+# Frontend
+node_modules/
+dist/
+coverage/
+npm-debug.log*
+
+# Editores
+.vs/
+.idea/
+.vscode/
+
+# Configuración y datos locales
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+appsettings.*.local.json
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs y sistema operativo
+*.log
+.DS_Store
+Thumbs.db
+
+# Agente, telemetría y cachés locales
+.langgraph_api/
+.langsmith/
+.phoenix/
+.cache/
+.venv/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+.npmrc.local
+
+# Credenciales y certificados locales (las plantillas no contienen claves)
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+secrets.json
+appsettings.*.Local.json
+!.env.*.example
+
+# Datos persistidos y copias de seguridad locales
+/data/
+/volumes/
+/backups/
+*.dump
+*.sql.gz
+
+# Artefactos de herramientas del editor
+.codex/config.local.toml

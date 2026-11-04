@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Delivery Board</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <span class="eyebrow">Panel del equipo</span>
+      <h1>Delivery Board</h1>
+      <p>Una vista sencilla del trabajo que está moviendo el equipo.</p>
+    </div>
+    <div class="live"><span></span> Sistema activo</div>
+  </header>
+
+  <main>
+    <section class="metrics" aria-label="Resumen">
+      <article><span>Total</span><strong id="total">0</strong></article>
+      <article><span>Pendientes</span><strong id="pending">0</strong></article>
+      <article><span>En curso</span><strong id="in-progress">0</strong></article>
+      <article><span>Completadas</span><strong id="completed">0</strong></article>
+      <article><span>Bloqueadas (pendientes)</span><strong id="blocked">0</strong></article>
+    </section>
+
+    <section class="panel assistant-panel" aria-labelledby="assistant-title">
+      <span class="eyebrow">Pregunta al tablero</span>
+      <h2 id="assistant-title">¿En qué te podemos ayudar?</h2>
+      <form id="assistant-form">
+        <label for="assistant-question">Tu pregunta
+          <input id="assistant-question" name="question" type="text" placeholder="Ej. ¿Qué tareas están pendientes?" required autocomplete="off" aria-describedby="assistant-help">
+        </label>
+        <div class="assistant-actions">
+          <label for="assistant-provider">Proveedor
+            <select id="assistant-provider" name="provider">
+              <option value="ollama" selected>Ollama (local)</option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </label>
+          <button id="assistant-submit" type="submit">Consultar</button>
+        </div>
+        <p id="assistant-help">Cada consulta es independiente. Recibirás la respuesta completa aquí debajo.</p>
+      </form>
+      <p id="assistant-status" class="assistant-status" role="status" aria-live="polite" aria-atomic="true"></p>
+      <div id="assistant-result" class="assistant-result" hidden>
+        <h3>Respuesta</h3>
+        <p id="assistant-answer"></p>
+      </div>
+    </section>
+
+    <section class="layout">
+      <article class="panel">
+        <div class="panel-title">
+          <div><span class="eyebrow">Actividad</span><h2>Trabajo reciente</h2></div>
+          <button id="refresh" class="secondary">Actualizar</button>
+        </div>
+        <div class="view-controls" aria-label="Filtros y orden del tablero">
+          <label>Estado
+            <select id="status-filter"><option value="All">Todos</option><option value="Pending">Pendientes</option><option value="InProgress">En curso</option><option value="Completed">Completadas</option><option value="Blocked">Bloqueadas</option></select>
+          </label>
+          <label>Prioridad
+            <select id="priority-filter"><option value="All">Todas</option><option value="Low">Baja</option><option value="Medium">Media</option><option value="High">Alta</option></select>
+          </label>
+          <label>Orden
+            <select id="sort-order"><option value="base">Orden habitual</option><option value="priority">Alta → Media → Baja</option></select>
+          </label>
+        </div>
+        <div id="work-items" class="work-items"></div>
+      </article>
+
+      <aside class="panel">
+        <span class="eyebrow">Nueva tarea</span>
+        <h2>Añadir al tablero</h2>
+        <form id="work-item-form">
+          <label>Título<input name="title" maxlength="160" required placeholder="Ej. Revisar integración"></label>
+          <label>Responsable<input name="owner" maxlength="80" required placeholder="Nombre del responsable"></label>
+          <label>Prioridad
+            <select name="priority">
+              <option value="Low">Baja</option>
+              <option value="Medium" selected>Media</option>
+              <option value="High">Alta</option>
+            </select>
+          </label>
+          <label for="new-comment">Comentario (opcional)
+            <textarea id="new-comment" name="comment" rows="4"></textarea>
+          </label>
+          <button type="submit">Crear tarea</button>
+          <p id="message" role="status" aria-atomic="true"></p>
+        </form>
+      </aside>
+    </section>
+  </main>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-message">
+    <form method="dialog">
+      <h2 id="confirm-dialog-title"></h2>
+      <p id="confirm-dialog-message"></p>
+      <div class="confirm-dialog-actions">
+        <button id="confirm-dialog-cancel" type="submit" value="cancel" class="secondary">Cancelar</button>
+        <button id="confirm-dialog-accept" type="submit" value="confirm">Confirmar</button>
+      </div>
+    </form>
+  </dialog>
+  <script src="board-view.js"></script>
+  <script src="app.js"></script>
+  <script src="assistant.js"></script>
+</body>
+</html>

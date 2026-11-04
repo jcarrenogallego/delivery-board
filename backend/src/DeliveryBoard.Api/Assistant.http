@@ -1,0 +1,28 @@
+@baseUrl = http://localhost:5202
+
+### Pregunta independiente con Ollama
+POST {{baseUrl}}/api/assistant/query
+Content-Type: application/json
+
+{
+  "provider": "ollama",
+  "question": "¿Qué tareas están pendientes?"
+}
+
+### Pregunta independiente con OpenAI
+POST {{baseUrl}}/api/assistant/query
+Content-Type: application/json
+
+{
+  "provider": "openai",
+  "question": "Resume el estado actual del tablero."
+}
+
+### Validación: proveedor no admitido y pregunta vacía (400)
+POST {{baseUrl}}/api/assistant/query
+Content-Type: application/json
+
+{
+  "provider": "other",
+  "question": " "
+}

@@ -1,0 +1,35 @@
+@baseUrl = http://localhost:5202
+@id = 00000000-0000-0000-0000-000000000000
+
+### Crear con comentario (copiar id de la respuesta)
+POST {{baseUrl}}/api/work-items
+Content-Type: application/json
+
+{"title":"Preparar demo","owner":"Ana","comment":"Revisar con el equipo"}
+
+### Consultar comentario persistido
+GET {{baseUrl}}/api/work-items/dashboard
+
+### Sustituir comentario de una tarea existente
+PATCH {{baseUrl}}/api/work-items/{{id}}/comment
+Content-Type: application/json
+
+{"comment":"Contexto actualizado\nSegunda línea"}
+
+### Borrar comentario
+PATCH {{baseUrl}}/api/work-items/{{id}}/comment
+Content-Type: application/json
+
+{"comment":""}
+
+### Tarea inexistente: 404 sin crear otra
+PATCH {{baseUrl}}/api/work-items/00000000-0000-0000-0000-000000000000/comment
+Content-Type: application/json
+
+{"comment":"No crear"}
+
+### Tipo inválido: 400 sin modificar la tarea
+PATCH {{baseUrl}}/api/work-items/{{id}}/comment
+Content-Type: application/json
+
+{"comment":42}

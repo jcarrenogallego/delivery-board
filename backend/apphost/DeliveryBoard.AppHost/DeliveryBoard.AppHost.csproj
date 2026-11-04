@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Sdk Name="Aspire.AppHost.Sdk" Version="13.5.2" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AspireUseCliBundle>true</AspireUseCliBundle>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>63a55df4-3db8-4255-9d0f-b65c30572add</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AppHost" />
+    <PackageReference Include="Aspire.Hosting.JavaScript" />
+    <PackageReference Include="Aspire.Hosting.PostgreSQL" />
+    <PackageReference Include="MessagePack" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DeliveryBoard.Api\DeliveryBoard.Api.csproj" />
+    <ProjectReference Include="..\..\src\DeliveryBoard.Assistant\DeliveryBoard.Assistant.csproj" />
+    <ProjectReference Include="..\..\src\DeliveryBoard.Mcp\DeliveryBoard.Mcp.csproj" />
+  </ItemGroup>
+
+</Project>

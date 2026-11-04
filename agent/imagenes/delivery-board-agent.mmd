@@ -1,0 +1,31 @@
+%%{init: {'flowchart': {'curve': 'linear'}}}%%
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	ModelCallLimitMiddleware_before_model(ModelCallLimitMiddleware.before_model)
+	ModelCallLimitMiddleware_after_model(ModelCallLimitMiddleware.after_model)
+	ModelCallLimitMiddleware_after_agent(ModelCallLimitMiddleware.after_agent)
+	ToolCallLimitMiddleware_consultar_sql__after_model(ToolCallLimitMiddleware[consultar_sql].after_model)
+	ToolCallLimitMiddleware_consultar_sql__after_agent(ToolCallLimitMiddleware[consultar_sql].after_agent)
+	ToolCallLimitMiddleware_crear_tarea__after_model(ToolCallLimitMiddleware[crear_tarea].after_model)
+	ToolCallLimitMiddleware_crear_tarea__after_agent(ToolCallLimitMiddleware[crear_tarea].after_agent)
+	model_request(model_request)
+	tools(tools)
+	__end__([<p>__end__</p>]):::last
+	ModelCallLimitMiddleware_after_agent --> __end__;
+	ToolCallLimitMiddleware_consultar_sql__after_agent --> ModelCallLimitMiddleware_after_agent;
+	ToolCallLimitMiddleware_crear_tarea__after_agent --> ToolCallLimitMiddleware_consultar_sql__after_agent;
+	__start__ --> ModelCallLimitMiddleware_before_model;
+	model_request --> ToolCallLimitMiddleware_crear_tarea__after_model;
+	tools --> ModelCallLimitMiddleware_before_model;
+	ModelCallLimitMiddleware_before_model -.-> model_request;
+	ModelCallLimitMiddleware_before_model -.-> __end__;
+	ToolCallLimitMiddleware_crear_tarea__after_model -.-> ToolCallLimitMiddleware_consultar_sql__after_model;
+	ToolCallLimitMiddleware_crear_tarea__after_model -.-> __end__;
+	ToolCallLimitMiddleware_consultar_sql__after_model -.-> ModelCallLimitMiddleware_after_model;
+	ToolCallLimitMiddleware_consultar_sql__after_model -.-> __end__;
+	ModelCallLimitMiddleware_after_model -.-> tools;
+	ModelCallLimitMiddleware_after_model -.-> model_request;
+	ModelCallLimitMiddleware_after_model -.-> ToolCallLimitMiddleware_crear_tarea__after_agent;
+	classDef default fill:#f2f0ff,line-height:1.2;
+	classDef first fill-opacity:0;
+	classDef last fill:#bfb6fc;
