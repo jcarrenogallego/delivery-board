@@ -63,3 +63,5 @@ appsettings.*.Local.json
 
 # Artefactos de herramientas del editor
 .codex/config.local.toml
+
+/.eval-logs/
