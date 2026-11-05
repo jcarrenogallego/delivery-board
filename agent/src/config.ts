@@ -29,6 +29,6 @@ export type Config = ReturnType<typeof leerConfig>;
 
 // Las ejecuciones locales no activan telemetría por defecto.
 export function prepararTelemetria() {
-  process.env.LANGSMITH_TRACING ??= "false";
-  process.env.LANGCHAIN_TRACING_V2 ??= "false";
+  process.env.LANGSMITH_TRACING ??= "true";
+  process.env.LANGCHAIN_TRACING_V2 ??= "true";
 }

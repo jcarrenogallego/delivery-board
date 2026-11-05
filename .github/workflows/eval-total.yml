@@ -1,0 +1,134 @@
+name: Eval Delivery Board - total
+
+on:
+  push:
+    branches: [codex/validar-eval-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eval-total:
+    name: eval-total
+    if: >-
+      github.repository == 'jcarrenogallego/delivery-board' &&
+      github.actor == 'jcarrenogallego'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ASPNETCORE_ENVIRONMENT: Evaluation
+      DOTNET_NOLOGO: 'true'
+      DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+      McpReader__Password: lector-exclusivo-del-eval
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Instalar agente con el lockfile
+        working-directory: agent
+        run: npm ci --ignore-scripts
+
+      - name: Comprobar TypeScript
+        working-directory: agent
+        run: npm run check
+
+      - name: Compilar solo API y MCP
+        run: |
+          dotnet build backend/src/DeliveryBoard.Api/DeliveryBoard.Api.csproj -c Release --nologo
+          dotnet build backend/src/DeliveryBoard.Mcp/DeliveryBoard.Mcp.csproj -c Release --nologo
+
+      - name: Arrancar base temporal
+        run: docker compose -f evals/compose.eval.yml up -d --wait
+
+      - name: Arrancar API, migrar y sembrar fixtures
+        env:
+          ConnectionStrings__deliveryboard: Host=127.0.0.1;Port=55439;Database=deliveryboard_eval;Username=postgres;Password=solo-laboratorio
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .eval-logs
+          nohup dotnet run --project backend/src/DeliveryBoard.Api/DeliveryBoard.Api.csproj \
+            --configuration Release --no-build --no-launch-profile \
+            --urls http://127.0.0.1:55202 > .eval-logs/api.log 2>&1 &
+          echo $! > .eval-logs/api.pid
+          ready=false
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:55202/health >/dev/null 2>&1; then ready=true; break; fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then echo "API no disponible"; exit 1; fi
+          cat evals/seed.sql | docker compose -f evals/compose.eval.yml exec -T postgres \
+            psql -v ON_ERROR_STOP=1 -U postgres -d deliveryboard_eval
+
+      - name: Arrancar MCP de solo lectura
+        env:
+          ConnectionStrings__deliveryboard: Host=127.0.0.1;Port=55439;Database=deliveryboard_eval;Username=mcp_reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup dotnet run --project backend/src/DeliveryBoard.Mcp/DeliveryBoard.Mcp.csproj \
+            --configuration Release --no-build --no-launch-profile \
+            --urls http://127.0.0.1:55091 > .eval-logs/mcp.log 2>&1 &
+          echo $! > .eval-logs/mcp.pid
+          ready=false
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:55091/health >/dev/null 2>&1; then ready=true; break; fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then echo "MCP no disponible"; exit 1; fi
+
+      - name: Ejecutar el único eval y aplicar el criterio de aprobación
+        working-directory: agent
+        env:
+          MODEL_PROVIDER: openai
+          OPENAI_MODEL: gpt-4o-mini
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DELIVERY_API_URL: http://127.0.0.1:55202
+          MCP_URL: http://127.0.0.1:55091/mcp
+          SKILLS_MODE: inline
+          MAX_SQL_ATTEMPTS: '2'
+          MAX_MODEL_CALLS: '12'
+          REQUEST_TIMEOUT_MS: '120000'
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT }}
+          LANGSMITH_WORKSPACE_ID: ${{ vars.LANGSMITH_WORKSPACE_ID }}
+          LANGSMITH_TRACING: 'true'
+          LANGCHAIN_TRACING_V2: 'true'
+          LANGSMITH_HIDE_INPUTS: 'false'
+          LANGSMITH_HIDE_OUTPUTS: 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$OPENAI_API_KEY" || { echo "Falta OPENAI_API_KEY"; exit 1; }
+          test -n "$LANGSMITH_API_KEY" || { echo "Falta LANGSMITH_API_KEY"; exit 1; }
+          test -n "$LANGSMITH_ENDPOINT" || { echo "Falta LANGSMITH_ENDPOINT"; exit 1; }
+          if [ -z "$LANGSMITH_WORKSPACE_ID" ]; then unset LANGSMITH_WORKSPACE_ID; fi
+          node scripts/eval-total.ts
+
+      - name: Mostrar diagnóstico si falla
+        if: failure()
+        shell: bash
+        run: |
+          for file in .eval-logs/api.log .eval-logs/mcp.log; do
+            if [ -f "$file" ]; then echo "--- $file ---"; tail -n 80 "$file"; fi
+          done
+
+      - name: Limpiar exclusivamente el entorno del eval
+        if: always()
+        shell: bash
+        run: |
+          for file in .eval-logs/api.pid .eval-logs/mcp.pid; do
+            if [ -f "$file" ]; then kill "$(cat "$file")" 2>/dev/null || true; fi
+          done
+          docker compose -f evals/compose.eval.yml down || true
