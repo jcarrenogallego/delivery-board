@@ -1,60 +1,459 @@
-# Un único eval: local → LangSmith → GitHub Actions
+# Un único eval, paso a paso: consola → LangSmith → CI
 
-## Objetivo
+## Dinámica de la sesión
 
-Evaluar **nuestro Delivery Board Agent real**, con OpenAI, PostgreSQL y MCP:
+Vamos a construir el ejercicio progresivamente, **modificando el mismo fichero
+`agent/scripts/eval-total.ts`**. No empezaremos con todo preparado:
 
-> Con tres tareas de laboratorio, preguntar cuántas hay. El agente debe obtener el esquema, consultar SQL y responder `3`.
+1. **Local:** crear un eval pequeño, ejecutar el agente que se conecta a tu
+   aplicación levantada con Aspire y ver una puntuación en consola.
+2. **LangSmith:** después de que funcione, añadir el SDK y la configuración
+   mínima, adaptar ese mismo fichero y ver el experimento en la web.
+3. **GitHub Actions:** solo entonces crear Docker Compose, las fixtures y el
+   workflow para levantar las dependencias en el servidor de CI.
 
-Usaremos **un caso y un criterio**, no una batería de pruebas. La puntuación será `1` si cumple todo lo anterior y `0` si no. Un fallo debe hacer fallar también el pipeline.
+En cada fase encontrarás el código completo y los pasos para ejecutarlo.
 
-Este Markdown contiene todos los ficheros para copiar y pegar. **Todavía no están implementados ni se ha ejecutado el ejemplo.** Publicar este documento no activa GitHub Actions.
+Todos los comandos parten de la raíz del monorepo `delivery-board`, salvo que
+se indique entrar en `agent/`.
 
-Todos los comandos parten de la raíz del monorepo `delivery-board`, salvo donde indicamos entrar en `agent/`. No trabajes en el repositorio histórico `proyecto-codex-dotnet`.
+## El caso que vamos a evaluar
 
-## Qué vamos a levantar
+Para no depender del número total de tareas que tenga tu tablero, utilizaremos
+un responsable exclusivo de laboratorio: **`EvalSesion`**, con **tres tareas**.
 
-```text
-PostgreSQL temporal (55439, base deliveryboard_eval)
-        ↑
-API .NET (55202): aplica migraciones y aprovisiona mcp_reader
-        ↑
-MCP .NET (55091): consulta con el usuario de solo lectura
-        ↑
-Agente TypeScript → OpenAI
-        ↓
-Evaluador en código → consola / experimento en LangSmith
-```
+- Pregunta: cuántas tareas tiene ese responsable.
+- Resultado esperado: `3`.
+- Puntuación: `1` si acierta y `0` si no.
 
-No necesitamos el frontend, Aspire ni el asistente .NET antiguo. **El MCP exige conexiones loopback**; lo ejecutamos en el mismo equipo/runner que el agente, no detrás de una red Docker que obligue a abrirlo a otros hosts. Solo PostgreSQL va en Docker.
-
-## Ficheros que crearás siguiendo la guía
-
-```text
-evals/compose.eval.yml
-evals/seed.sql
-agent/.env.eval                 # Privado, ignorado por Git
-agent/scripts/eval-total.ts
-.github/workflows/eval-total.yml
-```
-
-También actualizarás `agent/package.json` y su lockfile al instalar el SDK. Esta guía usa la variante actual de `createAgent`, no la variante opcional Deep Agents.
+Este es un eval de **resultado**, no de uso de herramientas. Acertar el número
+no demuestra por sí solo que el SQL o el recorrido del agente sean correctos.
+Inspeccionar el recorrido en las trazas es una actividad complementaria.
 
 ---
 
-# Parte 1 · Ejecutar el eval en local
+# Parte 1 · Crear el eval y verlo en consola
 
-## 1. Requisitos
+**En esta parte no instalamos ni configuramos el SDK de LangSmith para el eval.
+Tampoco creamos un Docker Compose nuevo.** Usaremos tu aplicación local de
+Delivery Board y sus servicios, que levantarás con Aspire como habitualmente.
 
-- Docker con Compose v2 y soporte de `up --wait`.
-- .NET SDK 10.
-- Node.js 24 o posterior, con ejecución nativa de TypeScript.
-- Una clave válida de OpenAI. **Revoca la clave antigua que se encontró en el historial; no la reutilices.**
-- Puertos `55439`, `55202` y `55091` libres.
+## 1. Instalar las dependencias habituales del agente
 
-Usaremos una base nueva y aislada. No conectes el seed a tu tablero habitual. Los comandos de arranque .NET compilan los proyectos cuando los ejecutes; preparar o leer este Markdown no compila nada.
+Necesitas Node.js 24 o posterior. En la raíz del repositorio:
 
-## 2. Crear `evals/compose.eval.yml`
+```powershell
+cd agent
+npm ci
+```
+
+No ejecutes todavía `npm install langsmith`: lo haremos en la parte 2.
+
+## 2. Crear `agent/scripts/eval-total.ts`: primera versión
+
+Crea el fichero con este contenido:
+
+```ts
+import { awaitAllCallbacks } from "@langchain/core/callbacks/promises";
+import { crearRuntime } from "../src/runtime.ts";
+import { crearSesion } from "../src/sesion.ts";
+
+const pregunta = "¿Cuántas tareas tiene el responsable EvalSesion? Responde únicamente con el número entero, sin texto adicional.";
+const runtime = await crearRuntime();
+
+try {
+  const sesion = crearSesion(runtime.agente, runtime.config);
+  const { resultado } = await sesion.enviar(pregunta);
+  const respuesta = String(resultado.messages.at(-1)?.content ?? "").trim();
+  const total = Number(respuesta);
+  const puntuacion = total === 3 ? 1 : 0;
+
+  console.log("Respuesta del agente:", respuesta);
+  console.log("Total esperado:", 3);
+  console.log("Puntuación:", puntuacion);
+  console.log(puntuacion === 1 ? "Eval aprobado" : "Eval NO aprobado");
+  if (puntuacion === 0) process.exitCode = 1;
+} finally {
+  try { await runtime.close(); }
+  finally { await awaitAllCallbacks(); }
+}
+```
+
+### Cómo leerlo
+
+1. Crear el runtime y la sesión de nuestro agente.
+2. Enviar la pregunta.
+3. Convertir su respuesta a número.
+4. Comparar con `3` y mostrar la puntuación con `console.log`.
+
+El `finally` cierra las conexiones y espera los callbacks pendientes. Si no
+aprueba, `process.exitCode = 1` permite que un futuro pipeline detecte el fallo.
+No hay imports del SDK de LangSmith, datasets online, selectores de modo ni
+código que borre o reescriba variables de entorno.
+
+## 3. Levantar Delivery Board con Aspire y reutilizar la configuración local
+
+Arranca la aplicación con tu dinámica habitual de Aspire y espera a que la API,
+la base de datos y el MCP estén disponibles. Puede usar Docker para su base de
+datos habitual; **aquí no añadimos un Compose específico del eval**.
+
+Reutiliza el `agent/.env` con el que ya ejecutas el agente. Si aún no existe,
+cópialo desde `.env.example` y configura tu modelo y tus propias credenciales.
+Utiliza tus propias credenciales y no las incluyas en archivos versionados.
+
+Aspire no exporta automáticamente la configuración a cualquier terminal Node
+que abras por separado. Comprueba que estas direcciones del `.env` coinciden
+con las que muestra su panel:
+
+```dotenv
+DELIVERY_API_URL=http://localhost:5202
+MCP_URL=http://127.0.0.1:5091/mcp
+```
+
+Son ejemplos de los puertos habituales, no valores que debas imponer a Aspire.
+Si tu API tiene otro puerto, utiliza el real. El MCP debe apuntar a `/mcp`.
+
+No añadas claves de LangSmith ni cambies variables desde el script en esta fase.
+Las trazas habituales del agente son independientes: este primer eval no crea
+un experimento de evaluación.
+
+## 4. Preparar y comprobar los datos locales
+
+En la interfaz de Delivery Board, crea estas tareas de laboratorio **solo si
+todavía no existen**:
+
+| Título | Responsable | Prioridad |
+| --- | --- | --- |
+| Laboratorio A | EvalSesion | Medium |
+| Laboratorio B | EvalSesion | Medium |
+| Laboratorio C | EvalSesion | High |
+
+No borres ni reasignes tareas ajenas para conseguir el resultado. El resto del
+tablero puede tener cualquier número de tareas: solo contamos las de EvalSesion.
+Antes de repetir, comprueba que no duplicas las tres tareas. Si ese responsable
+ya se utiliza para otros datos, reserva otro nombre y cámbialo coherentemente
+en la pregunta, el dataset y las fixtures de CI que prepararemos más adelante.
+
+Puedes comprobar los datos sin preguntarle al modelo. Desde otra terminal,
+usando la dirección real de la API:
+
+```powershell
+$api = "http://localhost:5202"
+$tablero = Invoke-RestMethod "$api/api/work-items/dashboard"
+$tareas = @($tablero.items | Where-Object { $_.owner -eq "EvalSesion" })
+$tareas | Select-Object title, owner
+$tareas.Count
+```
+
+Debe mostrar `3`. Esta lectura comprueba la preparación de datos; no es otro
+eval ni modifica la base de datos.
+
+## 5. Ejecutar la primera versión
+
+Desde `agent/`, con Aspire todavía en marcha:
+
+```powershell
+node --env-file-if-exists=.env scripts/eval-total.ts
+```
+
+Resultado esperado:
+
+```text
+Respuesta del agente: 3
+Total esperado: 3
+Puntuación: 1
+Eval aprobado
+```
+
+Si responde otro total, o una frase que no se puede convertir a número, la nota
+será `0`. No cambies la referencia para ocultar un fallo. Primero revisa las
+tres tareas, la configuración y la respuesta del agente.
+
+**Pausa aquí hasta que funcione.** Todavía no hemos necesitado una cuenta de
+LangSmith para evaluar el resultado. Las llamadas al modelo sí pueden consumir
+tu proveedor, aunque solo estés mostrando el resultado en consola.
+
+---
+
+# Parte 2 · Añadir LangSmith al mismo fichero
+
+Ahora que hemos entendido y ejecutado el eval local, vamos a guardar su caso,
+traza y puntuación en LangSmith. **No creamos otro script ni otra infraestructura.**
+
+## 6. Instalar ahora el SDK
+
+Desde `agent/`:
+
+```powershell
+npm install --save-exact langsmith@0.11.8
+```
+
+Este paso actualizará `agent/package.json` y `agent/package-lock.json`. Ambos
+deben versionarse cuando prepares la entrega, pero nunca el `.env`.
+
+## 7. Crear el dataset y añadir el ejemplo en la web
+
+### 7.1. Crear el dataset
+
+En el workspace correcto de LangSmith:
+
+1. Abre **Datasets & Experiments** y pulsa **+ New Dataset**.
+2. Selecciona **Create from scratch**.
+3. En **Name**, escribe exactamente `delivery-board-total-3`. Es obligatorio:
+   sin nombre no se habilita el botón **Create**.
+4. **Description** es opcional. En **Agent**, selecciona `delivery-board`.
+5. Deja **Tags** y **Dataset schema** sin configurar para este ejercicio.
+   No necesitas **Apply chat model schema** ni transformaciones.
+6. Pulsa **Create**, arriba a la derecha.
+
+**Input schema / Output schema definen la estructura de los datos, no el caso
+que vamos a evaluar.** El ejemplo se añade después de crear el dataset.
+Si decides definir un esquema, sus campos deben llamarse `pregunta` (string)
+y `total` (integer), respectivamente.
+
+### 7.2. Abrir el formulario del ejemplo
+
+En la página del dataset `delivery-board-total-3`:
+
+1. Abre la pestaña **Examples**.
+2. Pulsa **+ Example**, a la derecha.
+3. Se abrirá **Add Example to dataset**.
+
+### 7.3. Rellenar Inputs y Reference Outputs
+
+1. Deja **Dataset Splits** con el valor **base**.
+2. En **Inputs**, deja seleccionado **YAML** en el desplegable inferior.
+   Sustituye el contenido de ejemplo por:
+
+```yaml
+pregunta: "¿Cuántas tareas tiene el responsable EvalSesion? Responde únicamente con el número entero, sin texto adicional."
+```
+
+3. En **Reference Outputs**, deja también **YAML** y sustituye el contenido por:
+
+```yaml
+total: 3
+```
+
+El `3` va **sin comillas**, porque es un número. La pregunta es texto y debe
+coincidir exactamente con la que contiene el script. YAML y JSON representan
+los mismos campos; no necesitas cambiar el editor a JSON ni añadir llaves
+cuando estás usando YAML.
+
+4. No necesitas **Attachments**, **Upload Files** ni **Metadata**.
+5. Pulsa **Submit**, arriba a la derecha, para guardar el ejemplo.
+
+### 7.4. Comprobar el resultado
+
+Vuelve a **Examples** y comprueba que hay **una sola fila**, con la pregunta
+y el total de referencia `3`. Ese valor corresponde a las tres tareas de
+`EvalSesion` que preparaste en la aplicación local.
+
+Hasta aquí solo hemos guardado el caso: todavía no se ha ejecutado el agente
+ni creado un experimento. La ejecución llegará al lanzar el script adaptado.
+
+## 8. Añadir únicamente la configuración necesaria
+
+En el `.env` del agente, **conserva** la clave del modelo y las direcciones
+locales de API/MCP que ya funcionan. Añade o actualiza:
+
+```dotenv
+LANGSMITH_API_KEY=PEGA_AQUI_TU_CLAVE_DE_LANGSMITH
+LANGSMITH_TRACING=true
+LANGCHAIN_TRACING_V2=true
+```
+
+El endpoint solo se añade si necesitas indicar tu región explícitamente:
+
+```dotenv
+# Región US
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+# Si tu workspace es EU, sustituye la línea anterior por:
+# LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+```
+
+Si tu clave exige seleccionar workspace, añade `LANGSMITH_WORKSPACE_ID` con su
+identificador. Si no, no lo necesitas.
+
+### Configuración del experimento
+
+- En este proyecto `prepararTelemetria()` establece valores por defecto para
+  ambos flags. Déjalos a `true` en esta fase para mantenerlos coherentes; no
+  añadas lógica de configuración al script del eval.
+- Este experimento no necesita `LANGSMITH_PROJECT`, `LANGCHAIN_PROJECT`,
+  `LANGSMITH_AGENT_ID` ni `LANGSMITH_AGENT_ENVIRONMENT`: deja esas entradas
+  sin configurar para este ejercicio.
+
+Todo esto se hace **en la configuración**, no mediante `delete process.env`
+ni asignaciones dentro de `eval-total.ts`.
+
+Para inspeccionar las entradas y salidas ficticias de este ejercicio, configura:
+
+```dotenv
+LANGSMITH_HIDE_INPUTS=false
+LANGSMITH_HIDE_OUTPUTS=false
+```
+
+No utilices datos personales ni secretos en el dataset. No pegues claves en
+el chat, en el código ni en GitHub. Reinicia el comando tras cambiar el `.env`.
+
+## 9. Adaptar el mismo `eval-total.ts`
+
+Estos son los cambios respecto a la primera versión:
+
+1. **Añadir** `import { evaluate } from "langsmith/evaluation"`.
+2. **Mover** la ejecución del agente a `ejecutarAgente`, que recibirá el input
+   del dataset y devolverá la respuesta y el total.
+3. **Extraer** la comparación a `evaluarTotal`, que devuelve `{ key, score }`.
+4. **Sustituir** la ejecución manual de un caso por `await evaluate(...)`.
+5. Mantener el cierre y añadir la comprobación de una única puntuación aprobada.
+
+Para no mezclar fragmentos, sustituye el contenido del **mismo fichero** por
+esta segunda versión completa:
+
+```ts
+import { evaluate } from "langsmith/evaluation";
+import { awaitAllCallbacks } from "@langchain/core/callbacks/promises";
+import { crearRuntime } from "../src/runtime.ts";
+import { crearSesion } from "../src/sesion.ts";
+
+type Datos = Record<string, unknown>;
+const pregunta = "¿Cuántas tareas tiene el responsable EvalSesion? Responde únicamente con el número entero, sin texto adicional.";
+const notas: number[] = [];
+const runtime = await crearRuntime();
+
+// 1. Ejecutar el agente para el ejemplo del dataset.
+async function ejecutarAgente(inputs: Datos) {
+  if (inputs.pregunta !== pregunta) throw new Error("Pregunta inesperada en el dataset");
+  const sesion = crearSesion(runtime.agente, runtime.config);
+  const { resultado } = await sesion.enviar(pregunta);
+  const respuesta = String(resultado.messages.at(-1)?.content ?? "").trim();
+  return { respuesta, total: Number(respuesta) };
+}
+
+// 2. La comparación que antes hacíamos directamente en consola.
+function evaluarTotal({ outputs, referenceOutputs }: {
+  outputs?: Datos;
+  referenceOutputs?: Datos;
+}) {
+  const correcto = outputs?.total === 3 && referenceOutputs?.total === 3;
+  const nota = correcto ? 1 : 0;
+  notas.push(nota);
+  console.log("Total obtenido:", outputs?.total, "Puntuación:", nota);
+  return { key: "total_correcto", score: nota };
+}
+
+// 3. LangSmith ejecuta el ejemplo y guarda el experimento y su puntuación.
+try {
+  await evaluate(ejecutarAgente, {
+    data: "delivery-board-total-3",
+    evaluators: [evaluarTotal],
+    experimentPrefix: "delivery-board-total",
+    maxConcurrency: 1,
+    numRepetitions: 1,
+  });
+
+  const aprobado = notas.length === 1 && notas[0] === 1;
+  console.log(aprobado ? "Eval aprobado" : "Eval NO aprobado");
+  if (!aprobado) process.exitCode = 1;
+} finally {
+  try { await runtime.close(); }
+  finally { await awaitAllCallbacks(); }
+}
+```
+
+La regla sigue siendo la misma: el total debe ser `3`. `evaluate()` toma el
+ejemplo del dataset, llama al agente y al evaluador y registra el experimento.
+El `console.log` del evaluador permite seguir viendo la puntuación en la terminal.
+
+No hay dos modos dentro del fichero: la primera versión era solo local; esta
+segunda añade LangSmith y será la que reutilizaremos en CI.
+
+## 10. Crear el evaluador reutilizable en la web (opcional)
+
+La versión del SDK ya envía `total_correcto` al experimento. **No tienes que
+crear un evaluador web para ver esa puntuación.** Guardar código en el script
+no crea automáticamente una definición reutilizable en el catálogo Evaluators.
+
+Si quieres mostrar también esa pantalla durante la sesión:
+
+1. Abre **Evaluators → + Evaluator → Code evaluator / Custom code**.
+2. Nombre: **Delivery Board - total correcto**.
+3. Selecciona Python en el editor y pega:
+
+```python
+def perform_eval(run, example):
+    actual = run.get("outputs") or {}
+    esperado = (example or {}).get("outputs") or {}
+    correcto = actual.get("total") == 3 and esperado.get("total") == 3
+    return {"total_correcto": 1 if correcto else 0}
+```
+
+4. En el editor, un run con `outputs: {"total": 3}` y un example con
+   `outputs: {"total": 3}` deben puntuar `1`. Si el run devuelve `2`, puntúa `0`.
+5. Guarda la definición.
+
+No actives además una regla automática con ese evaluador sobre el dataset
+durante este ejercicio: el script ya ejecuta la misma regla y la duplicarías.
+No necesitamos un modelo juez ni una clave OpenAI en el editor web.
+
+## 11. Ejecutar de nuevo y ver qué sucede online
+
+Con los mismos servicios locales, las mismas tres tareas y el `.env` actualizado,
+ejecuta otra vez desde `agent/`:
+
+```powershell
+node --env-file-if-exists=.env scripts/eval-total.ts
+```
+
+Ahora, además de la salida en consola, abre en LangSmith:
+
+**Datasets & Experiments → delivery-board-total-3 → nuevo experimento con
+prefijo `delivery-board-total`.**
+
+Revisa la pregunta, la referencia `3`, la salida `respuesta/total`, el feedback
+`total_correcto` y la traza del agente.
+
+La ejecución sigue ocurriendo en tu equipo. La web no levanta tu API ni ejecuta
+tu aplicación por el hecho de crear un dataset.
+
+**Pausa aquí hasta comprobar el experimento. Solo después pasamos al pipeline.**
+
+---
+
+# Parte 3 · Preparar el entorno y el pipeline de CI
+
+## 12. Qué cambia al pasar al servidor de GitHub
+
+El runner no tiene tu Aspire arrancado, tu base local ni tu `.env`. Por eso
+**ahora sí** crearemos la infraestructura específica de evaluación:
+
+```text
+Runner Ubuntu de GitHub Actions
+  PostgreSQL temporal con Docker Compose
+  API .NET → migraciones y lector MCP
+  MCP .NET de solo lectura
+  El mismo eval-total.ts de la parte 2 → OpenAI y LangSmith
+```
+
+El MCP exige loopback: Compose levantará la base de datos y el workflow
+arrancará API/MCP en el propio runner, junto al agente. No abriremos el MCP a
+la red ni necesitaremos el frontend, Aspire o el asistente .NET antiguo en CI.
+
+El fichero del eval no vuelve a cambiar. Solo cambia la configuración que
+recibe del entorno:
+
+| Dato | En local | En CI |
+| --- | --- | --- |
+| API | Dirección real del panel de Aspire | `http://127.0.0.1:55202` |
+| MCP | Dirección real de Aspire con `/mcp` | `http://127.0.0.1:55091/mcp` |
+| PostgreSQL | Base habitual de formación | Base temporal `deliveryboard_eval`, puerto 55439 |
+| Claves | Configuración privada del agente | GitHub Secrets |
+| LangSmith | Dataset creado en la parte 2 | El mismo dataset y otro experimento |
+
+## 13. Crear ahora `evals/compose.eval.yml`
+
+Desde la raíz del monorepo, crea este fichero:
 
 ```yaml
 name: delivery-board-eval
@@ -76,38 +475,18 @@ services:
       retries: 40
 ```
 
-La contraseña anterior es **solo para esta base temporal**, no es una credencial de producción. No hay un volumen persistente: al eliminar este contenedor se pierden sus fixtures. No cambies el nombre del proyecto para apuntar a contenedores ajenos.
+La contraseña es solo de laboratorio y el puerto solo se publica en loopback.
+La base usa tmpfs: no comparte ni conserva volúmenes del tablero habitual.
+No hay que subir una base de datos de tu ordenador al repositorio.
 
-Desde la raíz, en una primera terminal:
+No ejecutes este Compose en la primera parte de la sesión; se utilizará en el
+workflow. Si decides ensayarlo después en local, sus puertos son distintos de
+los servicios habituales y sus datos deben permanecer aislados.
 
-```powershell
-docker compose -f evals/compose.eval.yml up -d --wait
-```
+## 14. Crear `evals/seed.sql`: los mismos datos, en una base nueva
 
-## 3. Arrancar la API en una segunda terminal
-
-Abre PowerShell en la raíz del repositorio:
-
-```powershell
-$env:ASPNETCORE_ENVIRONMENT = "Evaluation"
-$env:ConnectionStrings__deliveryboard = "Host=127.0.0.1;Port=55439;Database=deliveryboard_eval;Username=postgres;Password=solo-laboratorio"
-$env:McpReader__Password = "lector-exclusivo-del-eval"
-dotnet run --project backend/src/DeliveryBoard.Api/DeliveryBoard.Api.csproj --configuration Release --no-launch-profile --urls http://127.0.0.1:55202
-```
-
-Déjala abierta. La API existente aplica las migraciones y crea el lector MCP antes de escuchar peticiones. No hay que ejecutar `dotnet ef` por separado.
-
-En otra terminal puedes comprobar su disponibilidad:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:55202/health
-```
-
-Espera a que responda `status: ok` antes de continuar.
-
-## 4. Crear las tres tareas de laboratorio
-
-Crea `evals/seed.sql`:
+En CI no existen las tareas que creaste mediante la interfaz. Este seed creará
+las tres tareas de **EvalSesion** tras las migraciones de la API:
 
 ```sql
 BEGIN;
@@ -125,339 +504,51 @@ $guard$;
 INSERT INTO public.work_items
   ("Id", "Title", "Owner", "Priority", "Status", "CreatedAt", "PrerequisiteIds", "Comment")
 VALUES
-  ('00000000-0000-4000-8000-000000000001', 'Laboratorio A', 'Ana', 'Medium', 'Pending', '2026-01-01T00:00:00Z', ARRAY[]::uuid[], NULL),
-  ('00000000-0000-4000-8000-000000000002', 'Laboratorio B', 'Luis', 'Medium', 'Pending', '2026-01-01T00:00:00Z', ARRAY[]::uuid[], NULL),
-  ('00000000-0000-4000-8000-000000000003', 'Laboratorio C', 'Ana', 'High', 'Pending', '2026-01-01T00:00:00Z', ARRAY[]::uuid[], NULL);
+  ('00000000-0000-4000-8000-000000000001', 'Laboratorio A', 'EvalSesion', 'Medium', 'Pending', '2026-01-01T00:00:00Z', ARRAY[]::uuid[], NULL),
+  ('00000000-0000-4000-8000-000000000002', 'Laboratorio B', 'EvalSesion', 'Medium', 'Pending', '2026-01-01T00:00:00Z', ARRAY[]::uuid[], NULL),
+  ('00000000-0000-4000-8000-000000000003', 'Laboratorio C', 'EvalSesion', 'High', 'Pending', '2026-01-01T00:00:00Z', ARRAY[]::uuid[], NULL);
 COMMIT;
 ```
 
-Desde la raíz, con la API ya disponible:
+El seed rechaza una base distinta o no vacía; no borra datos para forzar la
+puntuación. Se ejecuta una vez en la base temporal y no en tu PostgreSQL habitual.
 
-```powershell
-Get-Content -Raw evals/seed.sql | docker compose -f evals/compose.eval.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres -d deliveryboard_eval
-```
+## 15. Configurar Secrets y Variables de GitHub
 
-Se utiliza SQL directo **solo para preparar las fixtures de esta base aislada**. El agente no recibe credenciales administrativas. El seed se ejecuta una vez; si lo repites, rechaza la base no vacía sin borrar nada.
-
-## 5. Arrancar el MCP en otra terminal
-
-Desde la raíz:
-
-```powershell
-$env:ASPNETCORE_ENVIRONMENT = "Evaluation"
-$env:ConnectionStrings__deliveryboard = "Host=127.0.0.1;Port=55439;Database=deliveryboard_eval;Username=mcp_reader"
-$env:McpReader__Password = "lector-exclusivo-del-eval"
-dotnet run --project backend/src/DeliveryBoard.Mcp/DeliveryBoard.Mcp.csproj --configuration Release --no-launch-profile --urls http://127.0.0.1:55091
-```
-
-Déjala abierta. Desde otra terminal:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:55091/health
-```
-
-El lector se llama `mcp_reader`; **no sustituyas ese usuario por `postgres` en el MCP**.
-
-## 6. Instalar el SDK de evaluación
-
-En la terminal desde la que ejecutarás el agente:
-
-```powershell
-cd agent
-npm ci
-npm install --save-exact langsmith@0.11.8
-```
-
-El SDK se instala como dependencia directa porque el nuevo script lo importa. Guarda después en Git tanto `package.json` como `package-lock.json`; el pipeline utilizará `npm ci`, no instalará versiones nuevas por su cuenta.
-
-## 7. Crear el archivo privado `agent/.env.eval`
-
-Estando en `agent/`, crea `.env.eval`:
-
-```dotenv
-MODEL_PROVIDER=openai
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_API_KEY=PEGA_AQUI_TU_NUEVA_CLAVE
-DELIVERY_API_URL=http://127.0.0.1:55202
-MCP_URL=http://127.0.0.1:55091/mcp
-SKILLS_MODE=inline
-MAX_SQL_ATTEMPTS=2
-MAX_MODEL_CALLS=12
-REQUEST_TIMEOUT_MS=120000
-
-EVAL_DESTINO=local
-LANGSMITH_TRACING=false
-LANGCHAIN_TRACING_V2=false
-```
-
-No modifiques tu `.env` habitual. `.env.eval` está cubierto por el `.gitignore`; nunca debes subirlo. Sustituye el marcador de la clave, no lo dejes como texto literal.
-
-## 8. Crear `agent/scripts/eval-total.ts`
-
-```ts
-import { evaluate } from "langsmith/evaluation";
-import { isAIMessage, isToolMessage } from "@langchain/core/messages";
-import { awaitAllCallbacks } from "@langchain/core/callbacks/promises";
-import { crearRuntime } from "../src/runtime.ts";
-import { crearSesion } from "../src/sesion.ts";
-
-const PREGUNTA = "¿Cuántas tareas hay en total? Responde únicamente con el número entero, sin texto adicional.";
-const destino = process.env.EVAL_DESTINO ?? "local";
-if (!["local", "langsmith"].includes(destino)) {
-  throw new Error("EVAL_DESTINO debe ser local o langsmith");
-}
-
-// Cada experimento crea su propio proyecto. No reutilizar el destino
-// de las trazas normales de un agente registrado en el workspace.
-delete process.env.LANGSMITH_AGENT_ID;
-delete process.env.LANGSMITH_AGENT_ENVIRONMENT;
-delete process.env.LANGSMITH_PROJECT;
-delete process.env.LANGCHAIN_PROJECT;
-process.env.LANGSMITH_TRACING = String(destino === "langsmith");
-process.env.LANGCHAIN_TRACING_V2 = String(destino === "langsmith");
-
-let evaluados = 0;
-let fallos = 0;
-
-type Datos = Record<string, unknown>;
-function totalCorrecto({ outputs, referenceOutputs }: {
-  outputs?: Datos;
-  referenceOutputs?: Datos;
-}) {
-  const correcto = referenceOutputs?.total === 3 &&
-    outputs?.total === 3 &&
-    outputs?.usoEsquema === true && outputs?.usoSql === true;
-  evaluados++;
-  if (!correcto) fallos++;
-  return { key: "total_correcto", score: correcto ? 1 : 0 };
-}
-
-const runtime = await crearRuntime();
-try {
-  async function ejecutar(inputs: Datos) {
-    // El dataset de este ejercicio solo puede ejecutar esta pregunta.
-    if (inputs.pregunta !== PREGUNTA) {
-      throw new Error("El ejemplo no coincide con la pregunta del laboratorio");
-    }
-    const { resultado, pausas } = await crearSesion(
-      runtime.agente, runtime.config,
-    ).enviar(PREGUNTA);
-    if (pausas.length) throw new Error("Una consulta de total no debe pedir confirmación");
-
-    const uso = new Set<string>();
-    for (const m of resultado.messages) {
-      if (!isToolMessage(m) || typeof m.content !== "string") continue;
-      try {
-        const dato = JSON.parse(m.content);
-        if (dato.ok === true && m.name) uso.add(m.name);
-      } catch { /* Un contenido no JSON no cuenta como éxito de estas tools. */ }
-    }
-    const ultimo = resultado.messages.at(-1);
-    const respuesta = ultimo && isAIMessage(ultimo) &&
-      typeof ultimo.content === "string" ? ultimo.content.trim() : "";
-    return {
-      respuesta,
-      total: /^\d+$/.test(respuesta) ? Number(respuesta) : null,
-      usoEsquema: uso.has("obtener_esquema"),
-      usoSql: uso.has("consultar_sql"),
-    };
-  }
-
-  if (destino === "local") {
-    const outputs = await ejecutar({ pregunta: PREGUNTA });
-    const nota = totalCorrecto({ outputs, referenceOutputs: { total: 3 } });
-    console.log("Resultado:", outputs);
-    console.log("Evaluación:", nota);
-  } else {
-    await evaluate(ejecutar, {
-      data: "delivery-board-total-3",
-      evaluators: [totalCorrecto],
-      experimentPrefix: "delivery-board-total",
-      maxConcurrency: 1,
-      numRepetitions: 1,
-    });
-  }
-
-  console.log(`Casos evaluados: ${evaluados}. Fallos: ${fallos}.`);
-  // Guardar feedback no basta: esta condición es la puerta de aprobación de CI.
-  if (evaluados !== 1 || fallos !== 0) process.exitCode = 1;
-} finally {
-  try { await runtime.close(); }
-  finally { await awaitAllCallbacks(); }
-}
-```
-
-Es una evaluación de **resultado y uso exitoso de herramientas**, no una comparación literal de una frase larga. Pedimos un número para poder comprobarlo sin un segundo modelo evaluador. No demuestra que cualquier pregunta o cualquier SQL sean correctos: cubre únicamente este caso.
-
-## 9. Ejecutar primero sin LangSmith
-
-Desde `agent/`:
-
-```powershell
-node --env-file-if-exists=.env.eval scripts/eval-total.ts
-```
-
-Si todo funciona, verás una salida similar a esta —es un resultado esperado, no una ejecución realizada al redactar la guía—:
-
-```text
-Resultado: { respuesta: '3', total: 3, usoEsquema: true, usoSql: true }
-Evaluación: { key: 'total_correcto', score: 1 }
-Casos evaluados: 1. Fallos: 0.
-```
-
-Si responde otro número, no usa las herramientas o falla un servicio, no debe aprobar. No cambies el valor esperado para ocultar un fallo. **Esta ejecución consume OpenAI**, aunque no envíe nada a LangSmith.
-
----
-
-# Parte 2 · Ver el mismo eval en LangSmith
-
-## 10. Crear el dataset en la web
-
-En LangSmith, dentro del workspace correcto:
-
-1. Abre **Datasets & Experiments**.
-2. Crea un dataset llamado exactamente **`delivery-board-total-3`**.
-3. Añade **un solo ejemplo** con los siguientes inputs y reference outputs.
-4. Guarda el ejemplo.
-
-Inputs:
-
-```json
-{
-  "pregunta": "¿Cuántas tareas hay en total? Responde únicamente con el número entero, sin texto adicional."
-}
-```
-
-Reference outputs:
-
-```json
-{ "total": 3 }
-```
-
-No añadas más filas a este dataset durante el ejercicio: el script exige exactamente un caso. La referencia `3` solo es válida para nuestra base aislada con las fixtures anteriores.
-
-## 11. Crear también el evaluador en la sección Evaluators
-
-Esto permite aprender la pantalla que vimos en la sesión. **No necesitas crearlo en la web para que el script muestre sus puntuaciones:** `evaluate()` ya envía su feedback. Un evaluador escrito en un script no aparece automáticamente como una definición reutilizable del catálogo web.
-
-Para guardar la misma regla como evaluador reutilizable:
-
-1. Entra en **Evaluators → + Evaluator**; alternativamente, utiliza **+ Evaluator** desde el dataset.
-2. Elige la opción de **Code evaluator / Custom code**, no `LLM-as-a-Judge`.
-3. Nombre: **`Delivery Board - total correcto`**.
-4. Selecciona **Python** en el editor y pega:
-
-```python
-def perform_eval(run, example):
-    actual = run.get("outputs") or {}
-    esperado = (example or {}).get("outputs") or {}
-    correcto = (
-        esperado.get("total") == 3
-        and actual.get("total") == 3
-        and actual.get("usoEsquema") is True
-        and actual.get("usoSql") is True
-    )
-    return {"total_correcto": 1 if correcto else 0}
-```
-
-5. Para comprobarlo en el editor, usa un run con `outputs` igual a `{ "total": 3, "usoEsquema": true, "usoSql": true }` y un example con `outputs` igual a `{ "total": 3 }`. Debe puntuar `1`; cambia el total del run a `2` y debe puntuar `0`.
-6. Guarda el evaluador. Los nombres concretos de los botones pueden variar entre versiones de la interfaz.
-
-**En la ejecución que sigue usamos el evaluador del script para controlar CI.** No actives además una regla automática con el mismo evaluador web sobre el dataset: duplicaría la evaluación. La versión guardada en la web queda disponible para una aplicación o revisión manual posterior sobre runs con ese formato de salida; no sirve para cualquier nodo interno del grafo, que puede tener otro formato.
-
-No se instala Python en nuestro agente por este paso: ese editor pertenece a LangSmith. Tampoco necesitamos configurar un modelo juez o una clave OpenAI en la web, porque la regla es código, no una llamada a otro modelo.
-
-## 12. Conectar el script con LangSmith
-
-En `agent/.env.eval`, cambia `EVAL_DESTINO` y añade lo siguiente:
-
-```dotenv
-EVAL_DESTINO=langsmith
-LANGSMITH_API_KEY=PEGA_AQUI_TU_CLAVE_DE_LANGSMITH
-LANGSMITH_ENDPOINT=https://api.smith.langchain.com
-LANGSMITH_TRACING=true
-LANGCHAIN_TRACING_V2=true
-LANGSMITH_HIDE_INPUTS=false
-LANGSMITH_HIDE_OUTPUTS=false
-```
-
-Utiliza el endpoint real de tu workspace. Si está en la región europea, utiliza `https://eu.api.smith.langchain.com`. Si tu clave necesita seleccionar workspace, añade `LANGSMITH_WORKSPACE_ID` con su identificador.
-
-No añadas aquí `LANGSMITH_AGENT_ID`, `LANGSMITH_AGENT_ENVIRONMENT` o `LANGSMITH_PROJECT`: este ejemplo crea experimentos, separados del destino de las trazas normales. El script elimina esas variables heredadas solo dentro de su proceso, sin modificar tu configuración habitual.
-
-Entradas y salidas se registran porque **son datos ficticios del laboratorio** y necesitamos inspeccionarlas. No uses datos personales ni secretos en el dataset. Estas opciones no sustituyen una revisión de privacidad ni recuperan datos que se ocultaron en ejecuciones anteriores.
-
-Vuelve a ejecutar, manteniendo los servicios y las tres fixtures:
-
-```powershell
-node --env-file-if-exists=.env.eval scripts/eval-total.ts
-```
-
-## 13. Ver el experimento
-
-En **Datasets & Experiments → delivery-board-total-3**, abre el nuevo experimento cuyo nombre empieza por **`delivery-board-total`**. Revisa:
-
-- La pregunta y la referencia.
-- La salida del agente: `respuesta`, `total`, `usoEsquema` y `usoSql`.
-- La columna de feedback **`total_correcto`**.
-- La traza con las llamadas al modelo y a las herramientas.
-
-La evaluación se ejecuta en tu equipo; LangSmith almacena el experimento, las trazas y las puntuaciones. **Crear el dataset/evaluador en la web no arranca tu aplicación local.**
-
----
-
-# Parte 3 · Llevar exactamente el mismo caso a GitHub Actions
-
-## 14. Guardar los ficheros que necesita CI
-
-Antes de activar el workflow, versiona los ficheros que has creado siguiendo esta guía:
-
-```text
-evals/compose.eval.yml
-evals/seed.sql
-agent/scripts/eval-total.ts
-agent/package.json
-agent/package-lock.json
-```
-
-**Nunca `agent/.env.eval`.** Comprueba el contenido preparado antes de hacer commit. Conserva los hooks existentes: pueden compilar y probar cuando implementes estos cambios. No se incluyen instrucciones para saltárselos.
-
-Añade también `/.eval-logs/` al `.gitignore` de la raíz: esa carpeta del workflow contiene logs y PID temporales, no código para versionar.
-
-El dataset debe existir ya en LangSmith. CI lo lee por su nombre; no lo recrea ni añade filas en cada push.
-
-## 15. Crear secretos y variables en GitHub
-
-En tu repositorio **delivery-board → Settings → Secrets and variables → Actions**:
+En **delivery-board → Settings → Secrets and variables → Actions**:
 
 ### Secrets
 
 | Nombre | Contenido |
 | --- | --- |
-| `OPENAI_API_KEY` | Nueva clave del proveedor para este laboratorio. |
-| `LANGSMITH_API_KEY` | Clave del workspace donde está el dataset. |
+| `OPENAI_API_KEY` | Clave real del modelo para el laboratorio. |
+| `LANGSMITH_API_KEY` | Clave del workspace donde existe el dataset. |
 
 ### Variables
 
 | Nombre | Contenido |
 | --- | --- |
-| `LANGSMITH_ENDPOINT` | El endpoint de tu región. |
-| `LANGSMITH_WORKSPACE_ID` | Solo si necesitas seleccionar el workspace; si no, no la crees. |
+| `LANGSMITH_ENDPOINT` | Endpoint de la región del workspace. |
+| `LANGSMITH_WORKSPACE_ID` | Solo si la clave necesita seleccionar workspace. |
 
-No pegues claves en el YAML, en issues o en capturas. Los colaboradores de un fork deben configurar sus propias claves en su repositorio; no recibirán las tuyas.
+Configura claves reales en los secretos: los valores de marcador no sirven
+para ejecutar CI.
+El pipeline no puede leer tus archivos `.env` locales; no los subas.
 
 ## 16. Crear `.github/workflows/eval-total.yml`
 
-**Este es el fichero completo del pipeline.** Puedes crearlo en el editor local o en GitHub mediante **Add file → Create new file**, indicando esa ruta. Guardar un YAML dentro del Markdown no activa nada: hay que crear el fichero real y subir también sus dependencias del paso 14.
+Este es el contenido completo para copiar al fichero real. Tenerlo escrito
+dentro del Markdown no activa GitHub Actions.
+
+El ejemplo se dispara por push a **`codex/validar-eval-ci`**, sin abrir PR,
+para validar la rama antes de adaptar la política definitiva de `main`.
 
 ```yaml
 name: Eval Delivery Board - total
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches: [codex/validar-eval-ci]
   workflow_dispatch:
 
 permissions:
@@ -468,9 +559,7 @@ jobs:
     name: eval-total
     if: >-
       github.repository == 'jcarrenogallego/delivery-board' &&
-      github.actor == 'jcarrenogallego' &&
-      (github.event_name != 'pull_request' ||
-       github.event.pull_request.head.repo.full_name == github.repository)
+      github.actor == 'jcarrenogallego'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -557,7 +646,6 @@ jobs:
           MAX_SQL_ATTEMPTS: '2'
           MAX_MODEL_CALLS: '12'
           REQUEST_TIMEOUT_MS: '120000'
-          EVAL_DESTINO: langsmith
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           LANGSMITH_ENDPOINT: ${{ vars.LANGSMITH_ENDPOINT }}
           LANGSMITH_WORKSPACE_ID: ${{ vars.LANGSMITH_WORKSPACE_ID }}
@@ -592,74 +680,90 @@ jobs:
           docker compose -f evals/compose.eval.yml down || true
 ```
 
-No se ejecutan las instrucciones PowerShell en Ubuntu: el workflow contiene su equivalente Bash completo. El runner descarga las dependencias y compila los servicios; no usa instalaciones ni servidores que estén en tu ordenador.
+El workflow instala dependencias, comprueba TypeScript, compila API/MCP,
+arranca PostgreSQL, espera la API, siembra los datos, espera el MCP y ejecuta
+el mismo fichero de la parte 2. Al finalizar limpia exclusivamente su entorno.
 
-Las claves de OpenAI y LangSmith solo se entregan al paso que ejecuta el eval, no a la instalación de paquetes ni a la compilación. En un entorno más estricto, fija también las acciones e imágenes por SHA/digest y revisa las actualizaciones periódicamente.
+Aquí sí se proporcionan las variables específicas de CI. No se borran ni se
+sobrescriben desde el script del eval. Las claves solo se entregan al paso que
+ejecuta la evaluación, no a la instalación o a la compilación.
 
-## 17. Ejecutarlo y ver los dos resultados
+Los bloques de comandos del runner son Bash; no copies los comandos PowerShell
+locales dentro de este YAML. Para un entorno más estricto fija también las
+acciones e imágenes por SHA/digest y revisa periódicamente las versiones.
 
-1. Sube los ficheros a una rama propia y después a `main`, o crea el workflow desde GitHub cuando el resto esté en `main`.
-2. En **Actions**, abre **Eval Delivery Board - total**.
-3. Puedes esperar al push o usar **Run workflow**, seleccionando `main`.
-4. Abre el job **eval-total** y sus pasos.
-5. En LangSmith, abre el dataset y el nuevo experimento del mismo prefijo.
+## 17. Guardar y ejecutar el workflow
 
-| Resultado | Qué significa |
-| --- | --- |
-| LangSmith muestra `total_correcto = 1` y GitHub está verde | El único caso ha pasado. |
-| LangSmith muestra `0` y GitHub está rojo | El script ha rechazado el comportamiento del agente. |
-| GitHub falla antes de ejecutar el eval | Es un fallo de preparación, compilación, conexión o configuración; puede no existir experimento. |
+Los ficheros que deberán estar versionados son:
 
-El script comprueba que hubo **exactamente un caso evaluado y cero fallos**. Los errores de red o del modelo tampoco deben aprobar en silencio. No hay un despliegue automático: esta guía cubre CI, no CD.
-
-Una vez que el check exista y esté validado, puedes marcar **eval-total** como comprobación obligatoria en una regla de protección de `main`. Esa regla es lo que impediría fusionar una PR sin un check aprobado; un job rojo por sí solo no impone una política de merge. No actives la exigencia antes del primer funcionamiento correcto.
-
----
-
-# Parte 4 · Repositorio público, escritura solo del propietario
-
-El repositorio es personal, propiedad de **`jcarrenogallego`**. En la revisión de preparación solo aparecía ese usuario como administrador; no había otros colaboradores, equipos ni claves de despliegue. La visibilidad era pública y los forks estaban permitidos.
-
-Para mantener esa situación:
-
-1. En **Settings → Collaborators / Manage access**, no invites a nadie con escritura.
-2. Mantén el repositorio público. El equipo puede leer, clonar y crear forks sin ser colaborador.
-3. El equipo sube sus cambios a **su fork**, no a tu `main`.
-4. Puede proponerte una Pull Request. Tú decides qué revisar y fusionar; un fork no concede escritura al original.
-5. No distribuyas tokens, claves de despliegue con escritura ni tu sesión de GitHub.
-
-El workflow anterior tiene `contents: read`: **no puede subir cambios al repositorio con su token de trabajo**. Además, solo ejecuta el job con tu usuario, en tu repositorio y sin usar código de PRs procedentes de forks. No utiliza `pull_request_target`.
-
-Por tanto, las PRs del equipo desde forks **no consumirán tus claves mediante este workflow**; el job aparecerá omitido. Para evaluarlas con tus secretos, primero revisa TODO el cambio, incluidas dependencias y workflows, y pásalo a una rama controlada por ti dentro del repositorio. No ejecutes código no confiable con tus claves simplemente por aprobar su ejecución.
-
-Si el equipo quiere ejecutar este ejemplo en sus propios forks, debe cambiar el filtro de repositorio/usuario y configurar sus propios secretos y dataset. No les añadas tus claves. Para evaluar PRs no confiables sin secretos, se prepararía otro workflow con herramientas/modelos simulados; no forma parte de este único eval.
-
----
-
-## Cerrar y repetir el laboratorio local
-
-Detén con `Ctrl+C` **solo las terminales de API y MCP que abriste para este ejercicio**. Desde la raíz:
-
-```powershell
-docker compose -f evals/compose.eval.yml down
+```text
+agent/scripts/eval-total.ts       # La segunda versión, con evaluate()
+agent/package.json
+agent/package-lock.json
+evals/compose.eval.yml
+evals/seed.sql
+.github/workflows/eval-total.yml
 ```
 
-Esto elimina únicamente los contenedores del proyecto `delivery-board-eval`. No uses `docker system prune` ni borres volúmenes del tablero habitual. Al arrancar de nuevo este contenedor temporal, aplica migraciones y seed otra vez.
+Añade `/.eval-logs/` al `.gitignore` de la raíz. **Nunca añadas `.env` ni claves.**
+Conserva los hooks de Git existentes; pueden compilar y probar al hacer commit.
 
-## Resumen final
+Cuando hayas revisado todo y decidas subir la rama:
 
-1. En local: tres fixtures + agente real + comprobación en consola.
-2. En LangSmith: un dataset, la regla de evaluación y experimentos comparables.
-3. En GitHub: el mismo script, entorno temporal y error si no cumple.
-4. Repositorio público para compartir; escritura del original reservada a tu cuenta.
+1. El push a `codex/validar-eval-ci` disparará el workflow sin PR.
+2. Abre **Actions → Eval Delivery Board - total → job eval-total**.
+3. Comprueba cada paso y después el nuevo experimento en LangSmith.
 
-**No se ha implementado ni ejecutado el pipeline al publicar esta guía.** Los resultados mostrados son esperados, no resultados de una validación real. Cada ejecución del agente consumirá llamadas al proveedor; LangSmith puede tener sus propios límites o costes de uso.
+`workflow_dispatch` se conserva, pero el botón manual puede no estar disponible
+hasta que el workflow exista en la rama predeterminada. La primera validación
+de esta rama utiliza el push, no depende de ese botón.
+
+| Resultado | Significado |
+| --- | --- |
+| Feedback `1` y job verde | El único caso ha pasado. |
+| Feedback `0` y job rojo | El resultado no cumple la referencia. |
+| Error antes del eval | Revisar preparación, compilación, servicios o credenciales; puede no existir experimento. |
+
+El script exige una única nota aprobada y usa código de salida de error si no
+se cumple. Guardar una nota en LangSmith por sí solo no bloquea GitHub.
+
+No exijas todavía este check como protección de `main`: no se ejecuta en esa
+rama ni en PRs. Una vez validado, adapta los eventos y la protección a la
+política definitiva. Este ejercicio cubre CI; no despliega la aplicación.
+
+---
+
+## Repositorio público y contribuciones del equipo
+
+Mantén el repositorio público y sin otros colaboradores con escritura. El
+equipo puede leer, clonar, crear forks y proponer cambios; solo tú decides
+qué fusionar en el repositorio original.
+
+El workflow tiene `contents: read` y filtros de repositorio y propietario.
+No utiliza eventos PR ni `pull_request_target`; los forks no disparan este
+workflow con tus claves. Para evaluar cambios externos, revisa antes TODO el
+código, dependencias y workflows y pásalos de forma controlada a una rama de
+confianza. No compartas claves ni tokens de escritura.
+
+Quien pruebe su propio fork tendrá que ajustar el filtro de usuario/repositorio
+y usar su dataset y sus secretos. El fork no concede escritura sobre el original.
+
+## Qué hemos hecho en cada fase
+
+| Fase | Creamos o cambiamos | Dónde se ejecuta |
+| --- | --- | --- |
+| 1 | Script pequeño y datos de laboratorio en la app existente | Consola local, servicios de Aspire |
+| 2 | SDK, dataset, configuración mínima y segunda versión del mismo script | Equipo local; resultados en LangSmith |
+| 3 | Compose, seed, Secrets/Variables y workflow | Runner temporal de GitHub |
+
+Las salidas mostradas ilustran el resultado esperado del ejercicio.
+Cada ejecución del agente puede consumir el proveedor; LangSmith tiene sus
+propios límites o costes de uso.
 
 ## Referencias
 
-- [Evaluaciones de LangSmith](https://docs.langchain.com/langsmith/evaluation-quickstart).
-- [Evaluadores de código en el SDK](https://docs.langchain.com/langsmith/code-evaluator-sdk).
-- [Evaluadores de código en la web](https://docs.langchain.com/langsmith/code-evaluator-ui).
-- [Secretos en GitHub Actions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets).
-- [Permisos en repositorios personales](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/repository-access-and-collaboration/permission-levels-for-a-personal-account-repository).
-- [Acciones oficiales de Node.js](https://github.com/actions/setup-node) y [.NET](https://github.com/actions/setup-dotnet).
+- [Evaluaciones en LangSmith](https://docs.langchain.com/langsmith/evaluation-quickstart).
+- [Evaluadores del SDK](https://docs.langchain.com/langsmith/code-evaluator-sdk).
+- [Evaluadores web](https://docs.langchain.com/langsmith/code-evaluator-ui).
+- [Secrets de GitHub Actions](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets).
+- [Permisos de repositorios personales](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/repository-access-and-collaboration/permission-levels-for-a-personal-account-repository).
